@@ -1,0 +1,12 @@
+# Ignore all files in the parent folder
+/*
+# But do not ignore the .gitignore itself
+!.gitignore
+!figures/
+!contents/
+!cumcmthesis.cls
+!example.pdf
+!example.tex
+!reference.bib
+!README.md
+!figs/
