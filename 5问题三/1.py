@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# 文件名: solve_problem_3_final_corrected.py
-# 功能: 问题三最终求解代码（已修正并行计算错误）
+# 文件名: solve_problem_optimized.py
+# 功能: 问题三最终求解代码（整合了预计算和Joblib并行优化）
 
 import pandas as pd
 import numpy as np
@@ -11,13 +11,13 @@ import copy
 from pathlib import Path
 from collections import defaultdict
 from tqdm import tqdm
-import multiprocessing
+from joblib import Parallel, delayed
 
 # --- 1. 【核心配置区】 ---
 
 # --- CPU核心数设置 ---
-# 设置为 0 或 None 时，将自动使用所有可用的CPU核心
-NUM_CORES = 0 
+# Joblib中 -1 代表使用所有核心, -2 代表使用除一个外的所有核心（推荐，可防止UI卡死）
+N_JOBS = -2
 
 # --- 算法参数 ---
 POP_SIZE_PER_SUBPOP = 50
@@ -27,10 +27,10 @@ CX_PROB = 0.8
 MUT_PROB = 0.2
 MIGRATION_INTERVAL = 25
 MIGRATION_SIZE = 3
-ELITISM_SIZE = 2  # 保留每代最优个体数量，可根据需要调整
+ELITISM_SIZE = 2
 
 # --- 问题三特定参数 ---
-NUM_SCENARIOS = 100 
+NUM_SCENARIOS = 100
 YEARS = list(range(2024, 2031))
 
 # [P3] 定义相关性和替代性参数
@@ -100,7 +100,7 @@ def load_and_prepare_data(data_path):
                     area = row.get('种植面积/亩', params['P_area'][row['种植地块']])
                     yield_val = params['P_yield_base'].get((crop, row['地块类型']), 0)
                     total_yield += area * yield_val
-            if total_yield == 0: total_yield = 1000 
+            if total_yield == 0: total_yield = 1000
             params['P_demand_base'][crop] = total_yield
         params['S_suitability'] = defaultdict(int)
         for i in params['I_plots']:
@@ -157,9 +157,9 @@ class ScenarioGenerator:
         for year in YEARS:
             price_changes = {}
             for crop in self.base_params['J_crops']:
-                key = (crop, '平旱地')
+                key = (crop, '平旱地') # 使用一个代表性的地块类型来计算价格变化
                 p_new, p_base = scenario['price'][year].get(key, 0), self.base_params['P_price_base'].get(key, 1)
-                price_changes[crop] = (p_new - p_base) / p_base
+                price_changes[crop] = (p_new - p_base) / p_base if p_base != 0 else 0
             adjusted_demand = scenario['demand'][year].copy()
             for crop_a, rivals in CROSS_ELASTICITY.items():
                 if crop_a in adjusted_demand:
@@ -171,6 +171,34 @@ class ScenarioGenerator:
     def generate_scenarios(self, num_scenarios):
         print(f"（2）[P3] 正在生成 {num_scenarios} 个高级情景...")
         return [self.generate_one_scenario() for _ in tqdm(range(num_scenarios), desc="生成情景")]
+
+# --- 2.1. 【优化点】情景预处理器 ---
+def preprocess_scenarios(scenarios, params):
+    """
+    【优化说明】
+    该函数在GA主循环开始前运行一次，为每个情景预先计算好固定值。
+    这避免了在适应度函数中成千上万次的重复计算，是本次优化的核心。
+    """
+    print("\n（2.1）[P3] 正在预处理情景以提升计算效率...")
+    for scenario in tqdm(scenarios, desc="预处理情景"):
+        # (1) 预计算每个作物在7年内的总需求量
+        total_demand_7_years = defaultdict(float)
+        for crop in params['J_crops']:
+            total_demand_7_years[crop] = sum(scenario['demand'][y].get(crop, 0) for y in YEARS)
+        scenario['total_demand_7_years'] = total_demand_7_years
+
+        # (2) 预计算每个作物在7年内的平均售价
+        avg_price_7_years = defaultdict(float)
+        for crop in params['J_crops']:
+            all_prices = [
+                p for y in YEARS
+                for (c, pt), p in scenario['price'][y].items()
+                if c == crop and p > 0
+            ]
+            if all_prices:
+                avg_price_7_years[crop] = np.mean(all_prices)
+        scenario['avg_price_7_years'] = avg_price_7_years
+    return scenarios
 
 # --- 3. 遗传算法核心函数 ---
 def create_initial_solution(params):
@@ -235,11 +263,18 @@ def mutate(solution, params):
             mut_sol[y][k][i] = random.choice(possible_crops)
     return mut_sol
 
-def calculate_profits_for_solution(solution, params, scenarios):
+def evaluate_fitness_optimized(solution, params, scenarios):
+    """
+    【优化说明】
+    这是最终的适应度函数。它直接使用预处理步骤中算好的数据，
+    避免了内部的重复循环，是提升单次计算速度的关键。
+    """
     profits = []
     for scenario in scenarios:
         total_revenue, total_cost = 0, 0
         total_production_by_crop = defaultdict(float)
+
+        # 步骤1: 计算总成本和总产量
         for y in YEARS:
             for i in params['I_plots']:
                 plot_type, area = params['P_plot_type'][i], params['P_area'][i]
@@ -252,35 +287,41 @@ def calculate_profits_for_solution(solution, params, scenarios):
                     if cost > 1e9: continue
                     total_cost += area * cost
                     total_production_by_crop[crop] += area * yield_val
+
+        # 步骤2: 使用预计算的数据高效计算总收入
         for crop, production in total_production_by_crop.items():
-            total_demand_7_years = sum(scenario['demand'][y].get(crop, 0) for y in YEARS)
-            all_prices = [p for y_prices in scenario['price'].values() for (c, pt), p in y_prices.items() if c == crop and p > 0]
-            price = np.mean(all_prices) if all_prices else 0
+            total_demand_7_years = scenario['total_demand_7_years'].get(crop, 0)
+            price = scenario['avg_price_7_years'].get(crop, 0)
             if price > 0:
                 normal_qty = min(production, total_demand_7_years)
-                total_revenue += (normal_qty * price) + ((production - normal_qty) * price * 0.5)
+                excess_qty = production - normal_qty
+                total_revenue += (normal_qty * price) + (excess_qty * price * 0.5)
         profits.append(total_revenue - total_cost)
-    return profits
 
-def evaluate_fitness_p3(solution, params, scenarios):
-    profits = calculate_profits_for_solution(solution, params, scenarios)
     valid_profits = [p for p in profits if not np.isnan(p)]
     if not valid_profits: return -1e12
     return np.mean(valid_profits)
 
-# --- 4. MPGA 运行器 ---
-def run_mpga(params, scenarios, pool):
-    print(f"\n--- (3) 开始执行MPGA ---")
+# --- 4. MPGA 运行器 (使用 Joblib 极致优化版) ---
+def run_mpga(params, scenarios):
+    """
+    【优化说明】
+    此版本的MPGA运行器使用joblib进行并行化，相比内置的multiprocessing，
+    它通常有更低的开销和更智能的调度，且API更简洁。
+    """
+    print(f"\n--- (3) 开始执行MPGA (Joblib极致效率版) ---")
     populations = [[create_initial_solution(params) for _ in range(POP_SIZE_PER_SUBPOP)] for _ in range(NUM_POPULATIONS)]
     best_solution_overall, best_fitness_overall = None, -np.inf
-    
+
     for gen in tqdm(range(MAX_GEN), desc="MPGA进化中"):
         all_fitnesses = []
         for i in range(NUM_POPULATIONS):
             pop = populations[i]
-            # 【关键修改】直接将 evaluate_fitness_p3 传递给 starmap
-            task_args = [(sol, params, scenarios) for sol in pop]
-            fitnesses = pool.starmap(evaluate_fitness_p3, task_args)
+
+            # 【核心优化点】使用 joblib 进行高效并行计算
+            fitnesses = Parallel(n_jobs=N_JOBS)(
+                delayed(evaluate_fitness_optimized)(sol, params, scenarios) for sol in pop
+            )
             all_fitnesses.append(fitnesses)
             
             best_fit_in_pop = np.max(fitnesses)
@@ -311,62 +352,60 @@ def run_mpga(params, scenarios, pool):
                 migrants = [populations[i][idx] for idx in best_indices_current]
                 worst_indices_target = np.argsort(all_fitnesses[target_pop_idx])[:MIGRATION_SIZE]
                 for j in range(MIGRATION_SIZE):
-                    populations[target_pop_idx][worst_indices_target[j]] = copy.deepcopy(migrants[j])
-    
+                    populations[target_pop_idx][worst_indices_target[j]] = migrants[j]
+
     print(f"\n--- MPGA 优化完成 ---")
     return best_solution_overall, best_fitness_overall
 
 # --- 5. 主程序入口 ---
 if __name__ == '__main__':
-    # This setup is required for multiprocessing to work correctly, especially on Windows/MacOS
-    multiprocessing.freeze_support()
+    try:
+        project_dir = Path.cwd()
+        data_path = project_dir / 'Data'
+        output_dir = project_dir / '5问题三' / 'Result'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"--- 问题三 MPGA 求解启动 (最终优化版) ---")
+        print(f"数据读取路径: {data_path.resolve()}")
+        print(f"结果输出路径: {output_dir.resolve()}")
+        
+        print("\n（1）加载基础数据...")
+        base_params = load_and_prepare_data(data_path)
+        print(" -> 基础数据加载成功。")
+        
+        scenario_generator = ScenarioGenerator(base_params)
+        scenarios = scenario_generator.generate_scenarios(NUM_SCENARIOS)
+        print(" -> 高级情景生成成功。")
+        
+        # 【优化点】调用预处理函数，为所有情景预先计算好关键数据
+        scenarios = preprocess_scenarios(scenarios, base_params)
+        print(" -> 情景数据预处理完成，优化引擎启动。")
+        
+        # 直接调用基于Joblib的MPGA运行器
+        best_solution, best_fitness = run_mpga(base_params, scenarios)
+        
+        print(f"\n求解完成。")
+        print(f" -> 最优方案预期平均利润: {best_fitness:,.2f} 元")
 
-    num_cores_to_use = NUM_CORES if NUM_CORES and NUM_CORES > 0 else multiprocessing.cpu_count()
-    print(f"--- 检测到 {multiprocessing.cpu_count()} 个CPU核心，将启动 {num_cores_to_use} 个进程 ---")
-    
-    with multiprocessing.Pool(processes=num_cores_to_use) as pool:
-        try:
-            project_dir = Path.cwd()
-            data_path = project_dir /'Data'
-            output_dir = project_dir / '5问题三'/'Result'
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            print(f"--- 问题三 MPGA 求解启动 (最终版) ---")
-            print(f"数据读取路径: {data_path.resolve()}")
-            print(f"结果输出路径: {output_dir.resolve()}")
-            
-            print("\n（1）加载基础数据...")
-            base_params = load_and_prepare_data(data_path)
-            print(" -> 基础数据加载成功。")
-            
-            scenario_generator = ScenarioGenerator(base_params)
-            scenarios = scenario_generator.generate_scenarios(NUM_SCENARIOS)
-            print(" -> 高级情景生成成功。")
-            
-            best_solution, best_fitness = run_mpga(base_params, scenarios, pool)
-            
-            print(f"\n求解完成。")
-            print(f" -> 最优方案预期平均利润: {best_fitness:,.2f} 元")
+        if best_solution:
+            output_list = []
+            for y in sorted(best_solution.keys()):
+                for k in sorted(best_solution[y].keys()):
+                    for i in sorted(best_solution[y][k].keys()):
+                        crop = best_solution[y][k][i]
+                        if crop:
+                            output_list.append({'年份': y, '季节': k, '地块编号': i, '作物名称': crop, '种植面积（亩）': base_params['P_area'][i]})
+            result_df = pd.DataFrame(output_list)
+            file_path = output_dir / '问题三最优种植策略_优化版.xlsx'
+            result_df.to_excel(file_path, index=False)
+            print(f"最优方案已保存至: {file_path}")
+        else:
+            print("未能找到有效解。")
 
-            if best_solution:
-                output_list = []
-                for y in sorted(best_solution.keys()):
-                    for k in sorted(best_solution[y].keys()):
-                        for i in sorted(best_solution[y][k].keys()):
-                            crop = best_solution[y][k][i]
-                            if crop:
-                                output_list.append({'年份': y, '季节': k, '地块编号': i, '作物名称': crop, '种植面积（亩）': base_params['P_area'][i]})
-                result_df = pd.DataFrame(output_list)
-                file_path = output_dir / '问题三最优种植策略.xlsx'
-                result_df.to_excel(file_path, index=False)
-                print(f"最优方案已保存至: {file_path}")
-            else:
-                print("未能找到有效解。")
-
-        except FileNotFoundError:
-            print(f"\n错误：文件未找到。请检查您的项目文件夹内是否包含 'Data' 子文件夹，且附件1和2在其中。")
-            print(f"程序查找的路径是: {data_path.resolve()}")
-        except Exception as e:
-            print(f"\n程序主流程发生严重错误: {e}")
-            import traceback
-            traceback.print_exc()
+    except FileNotFoundError:
+        print(f"\n错误：文件未找到。请检查您的项目文件夹内是否包含 'Data' 子文件夹，且附件1和2在其中。")
+        print(f"程序查找的路径是: {data_path.resolve()}")
+    except Exception as e:
+        print(f"\n程序主流程发生严重错误: {e}")
+        import traceback
+        traceback.print_exc()
