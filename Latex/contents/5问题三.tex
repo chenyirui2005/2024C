@@ -86,15 +86,5 @@ C'_{j} = C_{s,j} \cdot \left(1 + \beta_j \cdot \max\left(0, \frac{\bar{Q_j} - 1.
     \label{fig:profit_dist}
 \end{figure}
 
-\subsection{灵敏度分析}
-为检验模型结果对关键假设参数的稳健性，我们对设定的六个市场敏感度系数（三类作物的价格敏感度与成本敏感度）进行了单因素灵敏度分析。在分析中，我们每次只变动一个参数，在其基准值附近取四个不同的水平，并为每个水平重新运行完整的优化过程，记录最终的预期平均利润变化。
 
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=\textwidth]{figs/5问题三/灵敏度分析图.png}
-    \caption{预期总利润对六个核心敏感度系数的响应分析。}
-    \label{fig:sensitivity_analysis}
-\end{figure}
-
-分析结果如图\ref{fig:sensitivity_analysis}所示。可以观察到，预期总利润对食用菌的价格敏感度$p_{\text{fungi}}$变化最为敏感，其对应的曲线斜率最大。这表明，食用菌这类高价值经济作物的市场供需关系是影响该乡村总体经济效益的关键因素。相比之下，总利润对粮食和蔬菜的价格及成本敏感度表现出很强的不敏感性，即使这些参数发生较大变化，最优利润水平也基本保持稳定。这说明，对于大宗农产品，本模型给出的种植策略具有很好的适用性和稳定性。
 
