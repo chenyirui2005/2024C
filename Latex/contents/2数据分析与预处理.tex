@@ -2,6 +2,24 @@
 
 为构建有效的种植策略优化模型，首先需要对研究背景中涉及的基础数据进行系统性的分析与处理。本章将围绕耕地资源特性、农作物种植条件及经济效益指标三个核心维度展开，旨在明确模型构建所需的基本参数与约束条件。
 
+
+\subsubsection{数据预处理}
+
+
+
+由于部分数据在数据表中带有空格后缀，影响数据读取，因此需对于单元格格式进行修改，将空格全部替换删除后，进行后续数据分析及模型建立。
+
+根据附件2给出的信息，2023年智慧大棚第一季的数据均与普通大棚第一季的相同，利用给出的普通大棚第一季的数据将2023年智慧大棚第一季数据补全。
+
+处理后的数据进行可视化后如\ref{fig:fig:2023年智慧大棚第一季数据}所示，可见处理后无缺失值。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figs/2数据分析与预处理/数据预处理后.jpg}
+    \caption{完整数据可视化}
+    \label{fig:2023年智慧大棚第一季数据}
+\end{figure}
+
 \subsection{耕地资源分析}
 
 该乡村的耕地资源主要由露天耕地与大棚构成。根据附件数据，我们汇总了各类土地的面积与分布情况。图\ref{fig:land_distribution}直观地展示了不同类型土地资源的面积占比。
@@ -84,7 +102,7 @@
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.8\textwidth]{figs/2数据分析与预处理/2023年单位亩利润.png}
+    \includegraphics[width=0.8\textwidth]{figs/2数据分析与预处理/2023年单位亩利润}
     \caption{2023年各作物单位亩利润}
     \label{fig:profit_per_mu_2023}
 \end{figure}
